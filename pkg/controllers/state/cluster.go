@@ -24,6 +24,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/awslabs/operatorpkg/serrors"
 	"github.com/samber/lo"
 	"go.uber.org/multierr"
 	appsv1 "k8s.io/api/apps/v1"
@@ -35,6 +36,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/klog/v2"
 	"k8s.io/utils/clock"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -251,8 +253,6 @@ func (c *Cluster) NominateNodeForPod(ctx context.Context, providerID string) {
 	}
 }
 
-// TODO remove this when v1alpha5 APIs are deprecated. With v1 APIs Karpenter relies on the existence
-// of the karpenter.sh/disruption taint to know when a node is marked for deletion.
 // UnmarkForDeletion removes the marking on the node as a node the controller intends to delete
 func (c *Cluster) UnmarkForDeletion(providerIDs ...string) {
 	c.mu.Lock()
@@ -260,14 +260,13 @@ func (c *Cluster) UnmarkForDeletion(providerIDs ...string) {
 
 	for _, id := range providerIDs {
 		if n, ok := c.nodes[id]; ok {
-			c.updateNodePoolResources(nil, c.nodes[id])
+			oldNode := n.ShallowCopy()
 			n.markedForDeletion = false
+			c.updateNodePoolResources(oldNode, n)
 		}
 	}
 }
 
-// TODO remove this when v1alpha5 APIs are deprecated. With v1 APIs Karpenter relies on the existence
-// of the karpenter.sh/disruption taint to know when a node is marked for deletion.
 // MarkForDeletion marks the node as pending deletion in the internal cluster state
 func (c *Cluster) MarkForDeletion(providerIDs ...string) {
 	c.mu.Lock()
@@ -275,8 +274,9 @@ func (c *Cluster) MarkForDeletion(providerIDs ...string) {
 
 	for _, id := range providerIDs {
 		if n, ok := c.nodes[id]; ok {
-			c.updateNodePoolResources(c.nodes[id], nil)
+			oldNode := n.ShallowCopy()
 			n.markedForDeletion = true
+			c.updateNodePoolResources(oldNode, n)
 		}
 	}
 }
@@ -703,7 +703,7 @@ func (c *Cluster) updateNodePoolResources(oldNode, newNode *StateNode) {
 func (c *Cluster) populateVolumeLimits(ctx context.Context, n *StateNode) error {
 	var csiNode storagev1.CSINode
 	if err := c.kubeClient.Get(ctx, client.ObjectKey{Name: n.Node.Name}, &csiNode); err != nil {
-		return client.IgnoreNotFound(fmt.Errorf("getting CSINode to determine volume limit for %s, %w", n.Node.Name, err))
+		return client.IgnoreNotFound(serrors.Wrap(fmt.Errorf("getting CSINode to determine volume limit, %w", err), "CSINode", klog.KRef("", n.Node.Name)))
 	}
 	for _, driver := range csiNode.Spec.Drivers {
 		if driver.Allocatable == nil {
